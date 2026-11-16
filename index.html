@@ -87,7 +87,7 @@
       <div class="who">liteserve</div>
       Chat runs <b>100% in your browser</b> — no API keys, no server, nothing leaves this device.
       Pick a model, hit <b>Load model</b> (first download is cached), then chat.
-      After that it works even when everything else sleeps.
+      After that it works even when everything else sleeps. The model runs in a background worker thread, so the page stays responsive while it thinks.
       <div class="fine" style="margin-top:8px">Needs WebGPU — Chrome/Edge on desktop, Chrome 121+ on Android. Check <a href="https://webgpureport.org" target="_blank" rel="noopener" style="color:var(--acc)">webgpureport.org</a> if it won't load.</div>
     </div>
   </div>
@@ -117,8 +117,6 @@
 </footer>
 
 <script type="module">
-import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.88";
-
 const Q = id => document.getElementById(id);
 const MODELS = [
   { id: "Qwen3.5-2B-q4f16_1-MLC",            label: "Qwen3.5 2B (default, same family as lite-coder)" },
@@ -130,7 +128,7 @@ const MODELS = [
   { id: "gemma-2-2b-it-q4f16_1-MLC",         label: "Gemma 2 2B IT" },
 ];
 
-let engine = null, engineId = null, busy = false, sending = false;
+let engineId = null, busy = false, sending = false, lastAborted = false, rendering = null;
 let history = [];
 const $sel = Q("model"), $chat = Q("chat"), $in = Q("in"), $send = Q("send"),
       $stop = Q("stop"), $load = Q("load"), $sys = Q("sys"), $stats = Q("stats"),
@@ -149,11 +147,37 @@ if (savedCustom) { Q("cus-repo").value = savedCustom.repo; Q("cus-lib").value = 
 $sel.addEventListener("change", () => localStorage.setItem("liteserve.model", $sel.value));
 $sys.addEventListener("change", () => localStorage.setItem("liteserve.sys", $sys.value));
 
+const worker = new Worker("worker.js", { type: "module" });
+let vramMap = null, pending = null, onDelta = null, onUsage = null, genDone = null;
+
+function engineLoad(payload) {
+  return new Promise((resolve, reject) => { pending = { resolve, reject }; worker.postMessage(payload); });
+}
+
+worker.onmessage = (e) => {
+  const m = e.data || {};
+  if (m.kind === "catalog") { vramMap = m.vram || {}; showMeta(); }
+  else if (m.kind === "progress") progress(m);
+  else if (m.kind === "loaded") { if (pending) { const p = pending; pending = null; p.resolve(m.id); } }
+  else if (m.kind === "delta") { if (onDelta) onDelta(m.delta || ""); }
+  else if (m.kind === "usage") { if (onUsage) onUsage(m.usage); }
+  else if (m.kind === "done") { if (genDone) { const g = genDone; genDone = null; g.res(); } }
+  else if (m.kind === "engine-error") {
+    lastAborted = !!m.aborted;
+    const err = new Error(m.error || "engine error");
+    if (genDone) { const g = genDone; genDone = null; g.rej(err); }
+    else if (pending) { const p = pending; pending = null; p.reject(err); }
+  }
+};
+worker.onerror = (e) => {
+  const err = new Error((e && e.message) || "worker failed to start");
+  if (pending) { const p = pending; pending = null; p.reject(err); }
+  if (genDone) { const g = genDone; genDone = null; g.rej(err); }
+};
+
 function vramOf(id) {
-  try {
-    const e = webllm.prebuiltAppConfig.model_list.find(m => m.model_id === id);
-    return e && e.vram_required_MB ? `${(e.vram_required_MB/1024).toFixed(1)} GB vRAM` : "";
-  } catch { return ""; }
+  const mb = vramMap && vramMap[id];
+  return mb ? `${(mb/1024).toFixed(1)} GB vRAM` : "";
 }
 function showMeta() { $meta.textContent = engineId ? `loaded: ${engineId}` : vramOf($sel.value); }
 showMeta();
@@ -188,16 +212,13 @@ function progress(t) {
 }
 
 async function reload(id) {
-  if (busy) return;
-  busy = true; notice("");
+  if (busy || sending) return;
+  busy = true; notice(""); engineId = null;
   $load.disabled = true; $sel.disabled = true; $send.disabled = true;
   $load.textContent = "Loading…";
   $bar.style.width = "0%"; $bl.textContent = "Fetching weights…";
   try {
-    if (engine) { try { engine.unload(); } catch {} }
-    engine = null; engineId = null;
-    engine = await webllm.CreateMLCEngine(id, { initProgressCallback: progress });
-    engineId = id;
+    engineId = await engineLoad({ kind: "load", id });
     $bw.style.display = "none";
     $send.disabled = false;
     $load.textContent = "Reload";
@@ -215,10 +236,10 @@ async function reload(id) {
 Q("load").addEventListener("click", () => reload($sel.value));
 
 async function send() {
-  if (!engine || sending) return;
+  if (!engineId || sending) return;
   const text = $in.value.trim();
   if (!text) return;
-  sending = true; dropWelcome();
+  sending = true; dropWelcome(); lastAborted = false;
   $in.value = ""; $send.disabled = true; $stop.disabled = false; $stats.textContent = "";
   notice("");
   addMsg("user").textContent = text;
@@ -230,37 +251,33 @@ async function send() {
   messages.push(...history, { role: "user", content: text });
   const t0 = performance.now();
   let first = 0, nTok = 0, full = "";
+  const finished = new Promise((res, rej) => { genDone = { res, rej }; });
+  onDelta = (d) => {
+    if (!first) { first = performance.now(); }
+    full += d;
+    out.innerHTML = "";
+    out.insertAdjacentHTML("beforeend", render(full));
+    main().scrollTop = 1e9;
+  };
+  onUsage = (u) => { nTok = (u && u.completion_tokens) || 0; };
+  worker.postMessage({ kind: "generate", messages, temperature: 0.7, top_p: 0.9, max_tokens: 1024 });
   try {
-    const chunks = await engine.chat.completions.create({
-      messages, stream: true, stream_options: { include_usage: true },
-      temperature: 0.7, top_p: 0.9, max_tokens: 1024,
-    });
-    for await (const c of chunks) {
-      const d = c.choices?.[0]?.delta?.content || "";
-      if (d) {
-        if (!first) { first = performance.now(); }
-        full += d;
-        out.innerHTML = "";
-        out.insertAdjacentHTML("beforeend", render(full));
-        main().scrollTop = 1e9;
-      }
-      if (c.usage) nTok = c.usage.completion_tokens || 0;
-    }
+    await finished;
     const dt = (performance.now() - (first || t0)) / 1000;
     const tps = nTok && dt ? (nTok / dt).toFixed(1) : "?";
     const prefill = first ? ` · prefill ${((first - t0) / 1000).toFixed(1)}s` : "";
     $stats.textContent = `${nTok} tok · ${tps} tok/s${prefill}`;
     history.push({ role: "user", content: text }, { role: "assistant", content: full });
   } catch (e) {
-    if (String(e).includes("interrupt")) { $stats.textContent = "stopped"; }
+    if (lastAborted) { $stats.textContent = "stopped"; }
     else notice(`<b>Generation error.</b> ${String(e.message || e)}`, true);
   } finally {
+    onDelta = null; onUsage = null; genDone = null;
     rendering = null;
     sending = false; $stop.disabled = true; $send.disabled = false; $in.focus();
   }
 }
 
-let rendering = null;
 function render(full) {
   if (!rendering || rendering.src !== full) {
     rendering = { src: full, html: thinkRender(escapeHtml(full)) };
@@ -268,16 +285,16 @@ function render(full) {
   return rendering.html;
 }
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
+  return s.replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m]));
 }
 function thinkRender(s) {
   let open = false, out = [], buf = "";
   const parts = s.split(/&lt;think&gt;|&lt;\/think&gt;/);
   for (let i = 0; i < parts.length; i++) {
-    if (i > 0) { out.push(open ? "</think>" : "<think>"); open = !open; }
+    if (i > 0) { out.push(open ? "</details>" : "<details open><summary>thinking…</summary>"); open = !open; }
     out.push(parts[i]);
   }
-  if (open) out.push("</think>");
+  if (open) out.push("</details>");
   return out.join("");
 }
 
@@ -285,7 +302,7 @@ Q("send").addEventListener("click", send);
 $in.addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
-Q("stop").addEventListener("click", () => { try { engine.interruptGenerate(); } catch {} });
+Q("stop").addEventListener("click", () => worker.postMessage({ kind: "abort" }));
 Q("clear").addEventListener("click", () => {
   history = []; rendering = null;
   $stats.textContent = "";
@@ -308,17 +325,12 @@ Q("cus-load").addEventListener("click", () => {
     vram_required_MB: 1,
     low_resource_required: true,
   };
-  const failWithoutLib = !lib && !guessLib(repo);
-  if (failWithoutLib) {
+  if (!lib && !guessLib(repo)) {
     notice("This repo has no detectable <code>…_cs1k-webgpu.wasm</code>. Paste its model_lib URL from the repo's files list.", true);
     return;
   }
-  const appConfig = {
-    ...webllm.prebuiltAppConfig,
-    model_list: [{ ...modelRecord }, ...webllm.prebuiltAppConfig.model_list],
-  };
   localStorage.setItem("liteserve.custom", JSON.stringify({ repo, lib }));
-  customLoad(id, appConfig);
+  customLoad(id, modelRecord);
 });
 function guessLib(repo) {
   const name = repo.split("/")[1] || "";
@@ -326,16 +338,13 @@ function guessLib(repo) {
   if (!m) return "";
   return `https://huggingface.co/${repo}/resolve/main/${name.slice(0, -4)}_cs1k-webgpu.wasm`;
 }
-async function customLoad(id, appConfig) {
-  if (busy) return;
-  busy = true; notice("");
+async function customLoad(id, record) {
+  if (busy || sending) return;
+  busy = true; notice(""); engineId = null;
   $load.disabled = true; $sel.disabled = true;
   $bar.style.width = "0%"; $bw.style.display = "block"; $bl.textContent = "Fetching custom weights…";
   try {
-    if (engine) { try { engine.unload(); } catch {} }
-    engine = null; engineId = null;
-    engine = await webllm.CreateMLCEngine(id, { appConfig, initProgressCallback: progress });
-    engineId = id;
+    engineId = await engineLoad({ kind: "loadCustom", id, record });
     $bw.style.display = "none"; $send.disabled = false;
     $load.textContent = "Reload";
     showMeta();

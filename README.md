@@ -16,5 +16,7 @@ server to sleep — once the model downloads (browser-cached), it runs on-device
 3. Publish as `markermork/<name>-MLC` on Hugging Face and point the Custom model box at it.
 
 ## Stack
-Single `index.html` — imports `@mlc-ai/web-llm@0.2.88` from jsDelivr, no build step.
+`index.html` (UI) + `worker.js` (the WebLLM engine runs in a dedicated web worker,
+so model loading and token generation never block the UI thread). Imports
+`@mlc-ai/web-llm@0.2.88` from jsDelivr, no build step.
 Deploy = push to `main`; GitHub Pages serves it automatically.
