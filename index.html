@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>liteserve — Qwen in your browser</title>
+<meta name="description" content="Free, private LLM chat running fully in your browser via WebLLM + WebGPU. No keys, no server, no sleep." />
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#131824; --panel2:#0f141f; --line:#232b3d;
+    --text:#e8ecf4; --mut:#8b94a8; --acc:#7c9cff; --acc2:#59c8a9;
+    --warn:#e2b34c; --err:#e26d5c; --user:#1b2537; --bot:#121724;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex; flex-direction:column;
+  }
+  header{
+    display:flex; gap:14px; align-items:center; flex-wrap:wrap;
+    padding:12px 18px; border-bottom:1px solid var(--line); background:var(--panel);
+  }
+  header h1{font-size:16px; margin:0 6px 0 0; letter-spacing:.3px}
+  header h1 span{color:var(--acc)}
+  select,button,input,textarea{
+    background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:7px 10px; font:inherit;
+  }
+  select:focus,button:focus,input:focus,textarea:focus{outline:1px solid var(--acc)}
+  button{cursor:pointer}
+  button:disabled{opacity:.45; cursor:default}
+  button.primary{background:var(--acc); border-color:var(--acc); color:#0b0e14; font-weight:600}
+  .grow{flex:1 1 auto}
+  .mut{color:var(--mut)}
+  #bar-wrap{display:none; width:100%; margin-top:6px}
+  #bar-track{height:8px; border-radius:6px; background:var(--panel2); border:1px solid var(--line); overflow:hidden}
+  #bar{height:100%; width:0%; background:linear-gradient(90deg,var(--acc),var(--acc2)); transition:width .3s}
+  #bar-label{font-size:12px; color:var(--mut); margin:4px 0 0}
+  #notice{
+    display:none; margin:0 18px; padding:9px 12px; border:1px solid var(--line);
+    border-radius:10px; background:var(--panel); color:var(--text); font-size:13px;
+  }
+  #notice.err{border-color:var(--err)}
+  #notice code{background:var(--panel2); padding:1px 5px; border-radius:5px}
+  main{flex:1; overflow-y:auto; padding:18px}
+  #chat{max-width:860px; margin:0 auto; display:flex; flex-direction:column; gap:12px}
+  .msg{border:1px solid var(--line); border-radius:12px; padding:10px 14px; white-space:pre-wrap; word-break:break-word}
+  .msg.user{background:var(--user); align-self:flex-end; max-width:85%}
+  .msg.bot{background:var(--bot); align-self:stretch}
+  .msg .who{font-size:11px; text-transform:uppercase; letter-spacing:.8px; color:var(--acc); margin-bottom:4px}
+  .msg.user .who{color:var(--acc2)}
+  .msg.bot .who{color:var(--acc)}
+  .fine{font-size:11.5px; color:var(--mut); text-align:center}
+  think{display:block; color:var(--mut); font-style:italic; border-left:2px solid var(--line); padding-left:8px; margin:2px 0 2px 2px}
+  footer{border-top:1px solid var(--line); background:var(--panel); padding:12px 18px 16px}
+  #composer{max-width:860px; margin:0 auto}
+  #hint{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px}
+  #hint .stats{font-size:12px; color:var(--mut)}
+  #row{display:flex; gap:10px; align-items:flex-end}
+  #in{flex:1; resize:vertical; min-height:44px; max-height:180px}
+  #adv{max-width:860px; margin:14px auto 0; font-size:13px}
+  #adv summary{cursor:pointer; color:var(--mut)}
+  #adv .grid{display:grid; grid-template-columns:1fr 1fr auto; gap:8px; margin-top:8px}
+  #adv input{width:100%}
+  @media (max-width:640px){ #adv .grid{grid-template-columns:1fr} header{padding:10px 12px} main{padding:12px} }
+</style>
+</head>
+<body>
+<header>
+  <h1>liteserve <span aria-hidden="true">·</span> <span class="mut">WebLLM</span></h1>
+  <select id="model" aria-label="Model"></select>
+  <span class="mut" id="model-meta"></span>
+  <span class="grow"></span>
+  <button id="load" class="primary">Load model</button>
+  <button id="clear">Clear chat</button>
+</header>
+<div id="notice"></div>
+<main>
+  <div id="bar-wrap">
+    <div id="bar-track"><div id="bar"></div></div>
+    <p id="bar-label">Preparing…</p>
+  </div>
+  <div id="chat">
+    <div class="msg bot" id="welcome">
+      <div class="who">liteserve</div>
+      Chat runs <b>100% in your browser</b> — no API keys, no server, nothing leaves this device.
+      Pick a model, hit <b>Load model</b> (first download is cached), then chat.
+      After that it works even when everything else sleeps.
+      <div class="fine" style="margin-top:8px">Needs WebGPU — Chrome/Edge on desktop, Chrome 121+ on Android. Check <a href="https://webgpureport.org" target="_blank" rel="noopener" style="color:var(--acc)">webgpureport.org</a> if it won't load.</div>
+    </div>
+  </div>
+</main>
+<footer>
+  <div id="composer">
+    <div id="hint">
+      <span class="mut">System prompt</span>
+      <input id="sys" placeholder="You are a helpful assistant." />
+      <span class="grow"></span>
+      <span class="stats" id="stats"></span>
+      <button id="stop" disabled>Stop</button>
+    </div>
+    <div id="row">
+      <textarea id="in" rows="2" placeholder="Ask anything… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send" class="primary" disabled>Send</button>
+    </div>
+    <details id="adv">
+      <summary>Custom model (advanced) — point at any WebLLM/Mlc-compiled repo on Hugging Face</summary>
+      <div class="grid">
+        <input id="cus-repo" placeholder="Hugging Face repo id, e.g. markermork/Qwen3.5-2B-litesft-MLC" />
+        <input id="cus-lib" placeholder="model_lib URL (…_cs1k-webgpu.wasm)" />
+        <button id="cus-load">Load custom</button>
+      </div>
+    </details>
+  </div>
+</footer>
+
+<script type="module">
+import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.88";
+
+const Q = id => document.getElementById(id);
+const MODELS = [
+  { id: "Qwen3.5-2B-q4f16_1-MLC",            label: "Qwen3.5 2B (default, same family as lite-coder)" },
+  { id: "Qwen3.5-0.8B-q4f16_1-MLC",          label: "Qwen3.5 0.8B (lighter, faster)" },
+  { id: "Qwen3-1.7B-q4f16_1-MLC",            label: "Qwen3 1.7B" },
+  { id: "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC", label: "Qwen2.5-Coder 1.5B (code)" },
+  { id: "Llama-3.2-1B-Instruct-q4f16_1-MLC", label: "Llama 3.2 1B" },
+  { id: "SmolLM2-1.7B-Instruct-q4f16_1-MLC", label: "SmolLM2 1.7B" },
+  { id: "gemma-2-2b-it-q4f16_1-MLC",         label: "Gemma 2 2B IT" },
+];
+
+let engine = null, engineId = null, busy = false, sending = false;
+let history = [];
+const $sel = Q("model"), $chat = Q("chat"), $in = Q("in"), $send = Q("send"),
+      $stop = Q("stop"), $load = Q("load"), $sys = Q("sys"), $stats = Q("stats"),
+      $notice = Q("notice"), $bw = Q("bar-wrap"), $bar = Q("bar"), $bl = Q("bar-label"),
+      $meta = Q("model-meta");
+
+for (const m of MODELS) {
+  const o = document.createElement("option");
+  o.value = m.id; o.textContent = m.label;
+  $sel.appendChild(o);
+}
+$sel.value = localStorage.getItem("liteserve.model") || MODELS[0].id;
+$sys.value = localStorage.getItem("liteserve.sys") || "";
+const savedCustom = JSON.parse(localStorage.getItem("liteserve.custom") || "null");
+if (savedCustom) { Q("cus-repo").value = savedCustom.repo; Q("cus-lib").value = savedCustom.lib; }
+$sel.addEventListener("change", () => localStorage.setItem("liteserve.model", $sel.value));
+$sys.addEventListener("change", () => localStorage.setItem("liteserve.sys", $sys.value));
+
+function vramOf(id) {
+  try {
+    const e = webllm.prebuiltAppConfig.model_list.find(m => m.model_id === id);
+    return e && e.vram_required_MB ? `${(e.vram_required_MB/1024).toFixed(1)} GB vRAM` : "";
+  } catch { return ""; }
+}
+function showMeta() { $meta.textContent = engineId ? `loaded: ${engineId}` : vramOf($sel.value); }
+showMeta();
+
+function notice(html, isErr=false) {
+  if (!html) { $notice.style.display = "none"; return; }
+  $notice.style.display = "block";
+  $notice.className = isErr ? "err" : "";
+  $notice.innerHTML = html;
+}
+function addMsg(role) {
+  const d = document.createElement("div");
+  d.className = `msg ${role === "user" ? "user" : "bot"}`;
+  const who = document.createElement("div");
+  who.className = "who"; who.textContent = role === "user" ? "you" : engineId || "assistant";
+  const txt = document.createElement("div");
+  txt.className = "txt";
+  d.appendChild(who); d.appendChild(txt);
+  $chat.appendChild(d);
+  main().scrollTop = 1e9;
+  return txt;
+}
+const main = () => document.querySelector("main");
+let welcomeEl = Q("welcome");
+function dropWelcome() { if (welcomeEl && welcomeEl.parentNode) welcomeEl.parentNode.removeChild(welcomeEl); }
+
+function progress(t) {
+  $bw.style.display = "block";
+  const pct = Math.round((t.progress || 0) * 100);
+  $bar.style.width = pct + "%";
+  $bl.textContent = `${pct}% — ${t.text || ""}`;
+}
+
+async function reload(id) {
+  if (busy) return;
+  busy = true; notice("");
+  $load.disabled = true; $sel.disabled = true; $send.disabled = true;
+  $load.textContent = "Loading…";
+  $bar.style.width = "0%"; $bl.textContent = "Fetching weights…";
+  try {
+    if (engine) { try { engine.unload(); } catch {} }
+    engine = null; engineId = null;
+    engine = await webllm.CreateMLCEngine(id, { initProgressCallback: progress });
+    engineId = id;
+    $bw.style.display = "none";
+    $send.disabled = false;
+    $load.textContent = "Reload";
+    notice("");
+    showMeta();
+  } catch (e) {
+    $bw.style.display = "none";
+    $load.textContent = "Load model";
+    notice(`<b>Load failed.</b> ${String(e.message || e)}. If your GPU is older, try the q4f32_1 variant of the same model via Custom model below, or pick a smaller model.`, true);
+  } finally {
+    busy = false; $load.disabled = false; $sel.disabled = false;
+  }
+}
+
+Q("load").addEventListener("click", () => reload($sel.value));
+
+async function send() {
+  if (!engine || sending) return;
+  const text = $in.value.trim();
+  if (!text) return;
+  sending = true; dropWelcome();
+  $in.value = ""; $send.disabled = true; $stop.disabled = false; $stats.textContent = "";
+  notice("");
+  addMsg("user").textContent = text;
+  const out = addMsg("bot");
+  const sys = $sys.value.trim();
+  const messages = [];
+  if (sys) messages.push({ role: "system", content: sys });
+  history = history.slice(-16);
+  messages.push(...history, { role: "user", content: text });
+  const t0 = performance.now();
+  let first = 0, nTok = 0, full = "";
+  try {
+    const chunks = await engine.chat.completions.create({
+      messages, stream: true, stream_options: { include_usage: true },
+      temperature: 0.7, top_p: 0.9, max_tokens: 1024,
+    });
+    for await (const c of chunks) {
+      const d = c.choices?.[0]?.delta?.content || "";
+      if (d) {
+        if (!first) { first = performance.now(); }
+        full += d;
+        out.innerHTML = "";
+        out.insertAdjacentHTML("beforeend", render(full));
+        main().scrollTop = 1e9;
+      }
+      if (c.usage) nTok = c.usage.completion_tokens || 0;
+    }
+    const dt = (performance.now() - (first || t0)) / 1000;
+    const tps = nTok && dt ? (nTok / dt).toFixed(1) : "?";
+    const prefill = first ? ` · prefill ${((first - t0) / 1000).toFixed(1)}s` : "";
+    $stats.textContent = `${nTok} tok · ${tps} tok/s${prefill}`;
+    history.push({ role: "user", content: text }, { role: "assistant", content: full });
+  } catch (e) {
+    if (String(e).includes("interrupt")) { $stats.textContent = "stopped"; }
+    else notice(`<b>Generation error.</b> ${String(e.message || e)}`, true);
+  } finally {
+    rendering = null;
+    sending = false; $stop.disabled = true; $send.disabled = false; $in.focus();
+  }
+}
+
+let rendering = null;
+function render(full) {
+  if (!rendering || rendering.src !== full) {
+    rendering = { src: full, html: thinkRender(escapeHtml(full)) };
+  }
+  return rendering.html;
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
+}
+function thinkRender(s) {
+  let open = false, out = [], buf = "";
+  const parts = s.split(/&lt;think&gt;|&lt;\/think&gt;/);
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) { out.push(open ? "</think>" : "<think>"); open = !open; }
+    out.push(parts[i]);
+  }
+  if (open) out.push("</think>");
+  return out.join("");
+}
+
+Q("send").addEventListener("click", send);
+$in.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+Q("stop").addEventListener("click", () => { try { engine.interruptGenerate(); } catch {} });
+Q("clear").addEventListener("click", () => {
+  history = []; rendering = null;
+  $stats.textContent = "";
+  $chat.innerHTML = "";
+  welcomeEl = document.createElement("div");
+  welcomeEl.className = "msg bot";
+  welcomeEl.innerHTML = `<div class="who">liteserve</div>Cleared. ${engineId ? `<b>${engineId}</b> is still loaded.` : "Pick a model and hit <b>Load model</b>."}`;
+  $chat.appendChild(welcomeEl);
+});
+
+Q("cus-load").addEventListener("click", () => {
+  const repo = Q("cus-repo").value.trim().replace(/^https?:\/\/huggingface\.co\//, "").replace(/\/$/, "");
+  const lib = Q("cus-lib").value.trim();
+  if (!repo) { notice("Enter a Hugging Face repo id.", true); return; }
+  const id = "custom:" + repo;
+  const modelRecord = {
+    model: `https://huggingface.co/${repo}/resolve/main/`,
+    model_id: id,
+    model_lib: lib || guessLib(repo),
+    vram_required_MB: 1,
+    low_resource_required: true,
+  };
+  const failWithoutLib = !lib && !guessLib(repo);
+  if (failWithoutLib) {
+    notice("This repo has no detectable <code>…_cs1k-webgpu.wasm</code>. Paste its model_lib URL from the repo's files list.", true);
+    return;
+  }
+  const appConfig = {
+    ...webllm.prebuiltAppConfig,
+    model_list: [{ ...modelRecord }, ...webllm.prebuiltAppConfig.model_list],
+  };
+  localStorage.setItem("liteserve.custom", JSON.stringify({ repo, lib }));
+  customLoad(id, appConfig);
+});
+function guessLib(repo) {
+  const name = repo.split("/")[1] || "";
+  const m = name.match(/-(q[04]f(?:16|32)[\d_]*)-MLC$/);
+  if (!m) return "";
+  return `https://huggingface.co/${repo}/resolve/main/${name.slice(0, -4)}_cs1k-webgpu.wasm`;
+}
+async function customLoad(id, appConfig) {
+  if (busy) return;
+  busy = true; notice("");
+  $load.disabled = true; $sel.disabled = true;
+  $bar.style.width = "0%"; $bw.style.display = "block"; $bl.textContent = "Fetching custom weights…";
+  try {
+    if (engine) { try { engine.unload(); } catch {} }
+    engine = null; engineId = null;
+    engine = await webllm.CreateMLCEngine(id, { appConfig, initProgressCallback: progress });
+    engineId = id;
+    $bw.style.display = "none"; $send.disabled = false;
+    $load.textContent = "Reload";
+    showMeta();
+  } catch (e) {
+    $bw.style.display = "none";
+    notice(`<b>Custom model failed to load.</b> ${String(e.message || e)}`, true);
+  } finally {
+    busy = false; $load.disabled = false; $sel.disabled = false;
+  }
+}
+
+if (!navigator.gpu) {
+  notice("This browser has no <b>WebGPU</b>. Use Chrome or Edge (113+) on desktop, or Chrome on Android. Safari/Firefox: not yet. Nothing will load until you switch browsers.", true);
+  Q("load").disabled = true;
+}
+</script>
+</body>
+</html>
